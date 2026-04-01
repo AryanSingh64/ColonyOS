@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -n \"#### \\\\`societies\\\\`\" \"F:\\\\Github-Code\\\\SomeSortofProduts\\\\implementation_plan.md\")"
+    ]
+  }
+}
