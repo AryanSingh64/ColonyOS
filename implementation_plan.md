@@ -5,7 +5,7 @@
 ---
 
 ## Architecture
-
+ 
 ```
 ┌──────────────────────────────────────┐
 │         EXPO REACT NATIVE APP        │
@@ -51,90 +51,6 @@
 - **React Native Paper** over custom styling — gives Material Design 3 components out of the box (cards, FABs, chips, bottom sheets, dialogs). Looks polished on Android immediately. On iOS it's distinctive but clean.
 - **TanStack Query** — handles caching, background refetch, optimistic updates. Feed data stays fresh without manual state management. Combined with Supabase Realtime for truly live updates.
 - **No Redux/Zustand** — React Context for user session + society data. TanStack Query for server state. That's it.
-
----
-
-## GitHub Student Developer Pack — Cost Optimization
-
-You have access to the GitHub Student Developer Pack, which provides **free credits and services** that can significantly reduce or eliminate infrastructure costs during development and early launch. Here's how to leverage it for ColonyOS:
-
-### 💰 Direct Cost Savings
-
-| Service | Student Benefit | Value | How to Use for ColonyOS |
-|---|---|---|---|
-| **Expo** | Priority build queue + free EAS credits | ~$200/month build credit | Use EAS Build extensively during dev and testing. No need to worry about build limits. |
-| **Supabase** | 50% discount on Pro Plan (first year) | $25/month savings | Start with free tier, upgrade to Pro ($25/month → $12.50/month) for: 8GB DB (vs 500MB), 50GB storage (vs 1GB), 500K monthly active users (vs 10K), faster compute. |
-| **DigitalOcean** | $200 credits (valid 60 days) | $200 one-time | Use for: Edge Function fallback if Supabase hits limits, backup services, or deploying a demo landing page. Could also run a cheap PostgreSQL if scaling issues arise. |
-| **Cloudflare** | Free SSL/CDN + security | $20-100/month value | Use Cloudflare Tunnel to expose localhost for testing webhooks/Edge Functions. Use for custom domain CDN if you build a landing page. 1.1.1.1 DNS is free anyway. |
-| **Namecheap** | Free `.me` domain (1 year) + SSL | $10-20 value | Register `colonyos.me` or `yourproject.me` for landing page, admin dashboard, or brand. Free SSL included. |
-| **Sentry** | Free for 1 year (Pro plan) | $26/month value | **Critical** — Set up Sentry from day 1 to track crashes, errors, and performance issues in production builds. React Native integration is straightforward. |
-| **Pipedrive** | Free for 1 year | $20/month value | Track RWA sales pipeline when you start approaching buildings to adopt ColonyOS. Log contacts, follow-ups, conversion status. |
-| **PostHog** | Free tier with upgrade | $85/month value | Product analytics: track feature usage, funnels, retention. Auto-capture events in React Native. Better than Mixpanel for early-stage. |
-| **BetterStack** | Free for 1 year (up to 3 users) | $39/month value | Status page for uptime monitoring + incident communication. Useful if you have SLAs to RWAs or need to communicate downtime. |
-| **Auth0** | Free for 1 year (up to 7K MAU) | $23/month value | **Alternative to Supabase Auth** if you need more advanced auth features (SSO, MFA, breach detection). Probably not needed since Supabase Auth covers phone OTP. |
-| **Stripe** | No processing fees for first $1K | ~$30 savings | If you ever monetize (RWA subscriptions), Stripe's waived fees on first $1K in transactions. |
-| **JetBrains** | Free All Products Pack (1 year) | $150-650/year value | Use IntelliJ IDEA or WebStorm for backend/Edge Function development instead of VS Code. Free license. |
-| **GitHub** | Free Pro features forever | $4/month value | Private repos, advanced tools, CI/CD minutes. Already useful. |
-
-### 💡 Strategic Recommendations
-
-**Phase 0 (Before Writing Code):**
-1. Apply for GitHub Student Developer Pack if not already: https://education.github.com/pack
-2. Register `colonyos.me` (or similar) with Namecheap for branding
-3. Set up Sentry project and integrate SDK (takes 10 mins)
-4. Set up PostHog for analytics (tracks events automatically)
-5. Create landing page on Vercel/Netlify (free hosting) to capture interest from RWAs
-
-**During Development (Phases 1-4):**
-- Use Expo EAS priority builds — no waiting in queue
-- Start with Supabase free tier; upgrade to Pro (50% off) when you hit 10K MAU or 500MB DB
-- Use DigitalOcean credits to test backup strategies or deploy a simple admin dashboard (if you outgrow mobile-only admin)
-- Cloudflare Tunnel for exposing localhost to test webhooks from Supabase → Edge Functions during dev
-
-**During Launch (Phase 5-7):**
-- PostHog to identify where users drop off in onboarding
-- Sentry to catch production crashes before users report
-- Pipedrive to track RWA sales conversations
-- BetterStack status page to communicate scheduled maintenance or outages
-
-### 📊 Cost Projection Without Student Pack
-
-| Service | Monthly Cost (No Student Pack) | With Student Pack |
-|---|---|---|
-| Expo EAS Build (pro) | $25-50 | **$0** (credits cover) |
-| Supabase Pro | $25 | **$12.50** (50% off year 1) |
-| Sentry Pro | $26 | **$0** (year 1) |
-| PostHog Growth | $85 | **$0** (free tier sufficient until 1M events) |
-| Domain (.com/.me) | $10-15/year | **$0** (free .me year 1) |
-| Pipedrive | $20 | **$0** (year 1) |
-| **Total Year 1** | ~~$1,128~~ | **~$150** (mostly Supabase after free credits expire) |
-
-**You can build and launch ColonyOS MVP for under $200 total first year** with student benefits. Without them: ~$1,100.
-
-### ⚠️ Caveats & Planning
-
-- **Student status verification**: GitHub may ask for proof (student ID, enrollment). Apply early (approval takes 1-3 days).
-- **Expiration dates**: Most benefits are 1-year. Set calendar reminders to evaluate costs after year 1. By then you should have revenue or need to scale down.
-- **Supabase 50% discount**: Only applies to Pro plan, not Enterprise. You need to manually activate via the benefit page; it doesn't auto-apply.
-- **Expo EAS credits**: These are "build minutes" not a dollar amount. Priority builds help during dev, but credits may run out if you do massive CI/CD. Monitor usage in Expo dashboard.
-- **DigitalOcean $200**: One-time, expires after 60 days. Don't rely on it long-term. Use it for experimentation, not production hosting.
-
-### 🎯 Recommended Stack with Student Benefits
-
-```
-Frontend: Expo Router + React Native Paper (free)
-Backend: Supabase Pro ($12.50/mo after student discount)
-Auth: Supabase Auth (free tier OK for <10K MAU)
-Analytics: PostHog (free tier until 1M events)
-Error Tracking: Sentry Pro (free year 1)
-CI/CD: EAS Build (free credits cover dev builds)
-Domain: colonyos.me (free year 1)
-Sales CRM: Pipedrive (free year 1)
-Status Page: BetterStack (free year 1)
-IDE: JetBrains All Products Pack (free year 1)
-```
-
-This gives you a **professional-grade stack** for the price of a coffee per month.
 
 ---
 
