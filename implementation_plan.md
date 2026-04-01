@@ -1,885 +1,646 @@
-# ColonyOS — Implementation Plan
-
-> All-in-one society operating system: Communication + Gate Entry. Single Expo React Native app. All roles on phone. Supabase backend. No desktop.
-
-**Team:** 2 Full-Stack Developers  
-**Timeline:** 6-8 weeks (iterative, no hard deadlines)  
-**Strategy:** Build communication + gate entry together — gate entry drives adoption, communication drives engagement.
-
----
-
-## Architecture
-
-```
-┌──────────────────────────────────────────────────────────┐
-│           EXPO REACT NATIVE APP (2 Developer Team)     │
-│   Resident / RWA Admin / Guard (Role-Based UI)         │
-└────────────────┬─────────────────────────────────────────┘
-                 │
-    ┌────────────┴─────────────────────────────────────────┐
-    │ Features:                                            │
-    │  • Feed (alerts, notices, service, help, sale)     │
-    │  • Reactions + Comments                             │
-    │  • Directory + Direct Messages                      │
-    │  • Gate Entry (delivery approvals, visitor logging)│
-    │  • Admin Panel (CSV import, moderation, settings)  │
-    └─────────────────────────────────────────────────────┘
-                 │
-┌────────────────▼─────────────────────────────────────────┐
-│                 SUPABASE                                │
-│  ┌────────────────────────────────────────────────┐    │
-│  │ Auth (Phone OTP + SMS/Call Fallback)          │    │
-│  │ Postgres DB + Row Level Security (RLS)        │    │
-│  │ Realtime (feed updates, DMs, gate approvals) │    │
-│  │ Edge Functions (API routes, business logic)  │    │
-│  │ Storage (post images + gate rider photos)    │    │
-│  └────────────────────────────────────────────────┘    │
-└────────────────┬─────────────────────────────────────────┘
-                 │
-    ┌────────────┴──────────────────────────────────────────┐
-    │ Push via Expo (FCM/APNs)                             │
-    │ • Alerts & Notices (all residents)                  │
-    │ • Delivery approvals (specific resident)            │
-    │ • Direct messages                                   │
-    └──────────────────────────────────────────────────────┘
-```
-
-**Key Architectural Decisions:**
-
-1. **Single App, Multiple Roles** — Residents, Guards, Admins all use same binary. UI adapts via role-based navigation and conditional rendering.
-
-2. **RLS as Security Boundary** — All data access enforced at database level. Edge Functions use `service_role` key, but validate JWT + role before acting.
-
-3. **Realtime for Critical Flows** — New posts, DM messages, delivery approvals broadcast via Supabase Realtime channels. Feed uses cursor-based pagination + "new posts available" banner (no auto-insert).
-
-4. **Offline-First Guard Flow** — Gate entry works offline: guard creates entry locally, queues for sync, shows "pending" status. Photo upload retries when online.
-
-5. **Cost Optimization** — Gate photos auto-delete after 30 days (cron). Push notifications batched (100 tokens/batch, 200ms delay) to avoid Expo rate limits. Storage bucket per feature (posts vs gate).
-
-6. **Scalability Indexes** — All query patterns indexed: feed (`society_id, is_pinned, created_at`), gate entries (`society_id, approval_status`), DMs (`conversation_id`), residents (`user_id, society_id`).
-
----
-
-## Tech Stack
-
-| Layer | Technology |
-|---|---|
-| Mobile App | Expo SDK 52 + Expo Router (file-based) |
-| Language | TypeScript |
-| UI Components | React Native Paper (Material Design 3) |
-| State / Data | TanStack Query + Supabase Realtime |
-| Auth | Supabase Auth (Phone OTP) |
-| Database | Supabase Postgres + RLS |
-| Server Logic | Supabase Edge Functions (Deno) |
-| Push Notifications | Expo Notifications (wraps FCM/APNs) |
-| Image Storage | Supabase Storage |
-| Camera & QR | `expo-camera`, `expo-barcode-scanner` |
-| SMS Fallback | Twilio Verify (India) or MSG91 |
-| Analytics | PostHog (free tier) |
-| Error Tracking | Sentry (free via GitHub Student Pack) |
-| Landing Page | Vercel + Next.js (free) |
-| CRM | Pipedrive (free via GitHub Student Pack) |
-| Deployment | EAS Build → Play Store / TestFlight |
-
-### Why These Choices
-
-- **React Native Paper** over custom styling — gives Material Design 3 components out of the box (cards, FABs, chips, bottom sheets, dialogs). Looks polished on Android immediately. On iOS it's distinctive but clean.
-- **TanStack Query** — handles caching, background refetch, optimistic updates. Feed data stays fresh without manual state management. Combined with Supabase Realtime for truly live updates.
-- **No Redux/Zustand** — React Context for user session + society data. TanStack Query for server state. That's it.
-
----
-
-## App Structure
-
-```
-/app
-  _layout.tsx                    — root layout, auth gate
-  
-  /(auth)                        — unauthenticated screens
-    _layout.tsx
-    welcome.tsx                  — landing screen
-    login.tsx                    — phone number + OTP
-    join-society.tsx             — enter society code or scan QR
-    select-flat.tsx              — pick block + flat number
-    
-  /(main)                        — authenticated screens
-    _layout.tsx                  — bottom tab navigator
-    
-    /(feed)
-      index.tsx                  — feed with category filters
-      [postId].tsx               — post detail + reactions/comments
-      create.tsx                 — new post (category selector)
-      
-    /(directory)
-      index.tsx                  — resident list by flat
-      [residentId].tsx           — resident profile + DM button
-      
-    /(messages)
-      index.tsx                  — conversation list
-      [conversationId].tsx       — chat thread
-      
-    /(profile)
-      index.tsx                  — settings, notifications, role info
-      members.tsx                — 🔒 ADMIN ONLY: manage residents
-      notices.tsx                — 🔒 ADMIN ONLY: manage notices
-      reported.tsx               — 🔒 ADMIN ONLY: reported posts
-
-    /(gate) — NEW TAB (guards see, admins also see)
-      index.tsx                  — Gate entry form (type selector, flat search, photo)
-      history.tsx                — Gate logs list with filters
-      [entryId].tsx              — Entry detail + exit mark (for guards/admins)
-
-/lib
-  supabase.ts                    — client init + types
-  auth.tsx                       — auth context provider
-  notifications.ts               — Expo push token registration + handlers
-  types.ts                       — shared TypeScript types
-  constants.ts                   — category configs, expiry times, reaction types
-
-/components
-  // Communication Components
-  PostCard.tsx                   — single post in feed
-  ReactionBar.tsx                — reaction buttons (confirmed/resolved/thanks)
-  CategoryChip.tsx               — filter chips for feed
-  AlertBanner.tsx                — pinned alerts at top of feed
-  NoticeBanner.tsx               — pinned RWA notices
-  DuplicatePrompt.tsx            — "already posted, upvote instead?" bottom sheet
-  EmptyState.tsx                 — empty feed / directory states
-  FlatBadge.tsx                  — "B-204" identity tag component
-
-  // Gate Entry Components (NEW)
-  GateEntryScreen.tsx            — main gate form (type selector, flat search, photo)
-  EntryTypeSelector.tsx          — delivery/visitor/vip radio group
-  FlatSearchInput.tsx            — type-ahead flat search (virtualized list)
-  PhotoCapture.tsx               — camera + preview + capture button
-  DeliveryApprovalScreen.tsx     — resident approval view with photo
-  DeliveryApprovalCard.tsx       — push notification card component
-  GateLogsScreen.tsx             — filterable list of entries (admin/guard)
-  GateLogDetail.tsx              — entry details + exit mark button
-  ExitMarkButton.tsx             — floating action to mark exit
-  GateMetricsCard.tsx            — today's stats (entries, pending, avg approval time)
-```
-
-### Role-Based UI (Same App, Different Permissions)
-
-The app doesn't have separate "admin screens" hidden behind a menu. Instead:
-
-| Feature | Resident | RWA Admin | Guard |
-|---|---|---|---|
-| View feed | ✅ | ✅ | ✅ |
-| Post alerts/help/service/sale | ✅ | ✅ | ❌ |
-| Post notices | ❌ | ✅ | ✅ |
-| React to posts | ✅ | ✅ | ❌ |
-| Long-press post → Pin/Delete | ❌ | ✅ | ❌ |
-| Directory | ✅ (respects visibility) | ✅ (sees all) | ✅ (sees all) |
-| DMs | ✅ | ✅ | ❌ |
-| Gate tab access | ❌ | ✅ | ✅ |
-| Create delivery entry | ❌ | ✅ | ✅ |
-| Create visitor entry | ❌ | ✅ | ✅ |
-| Approve delivery (own flat) | ✅ | ✅ (any) | ❌ |
-| Mark exit | ❌ | ✅ | ✅ |
-| View gate logs | Own flat only | All | Own entries + today's |
-| Profile → "Manage Members" | ❌ | ✅ | ❌ |
-| Profile → "Reported Posts" | ❌ | ✅ | ❌ |
-
-**Guard role expanded:** Can post notices (RWA announcements), access gate tab for entry logging, view directory (to verify flats). Cannot use DMs or react to posts (maintains official separation).
-
-Admin features are accessed from the Profile tab. Extra menu items appear only if `role === 'admin'`. No hidden screens, no separate navigation — just conditional rendering.
-
----
-
-## Gate Entry Management System (v1 Lite)
-
-### Scope & Philosophy
-
-Gate entry solves the **physical security** problem: tracking who enters the society, when, and for which flat. This is the **adoption driver** — RWAs will pay for this feature, and it forces residents to install the app (deliveries require approval).
-
-**v1 Lite includes:**
-- ✅ **Delivery approvals** with mandatory rider photo + 3-minute expiry
-- ✅ **Visitor logging** (no approval, just entry/exit tracking)
-- ✅ **Gate logs** viewable by guards (own entries) and admins (all)
-- ✅ **Exit marking** by guards
-
-**Deferred to v2:**
-- ❌ VIP flow (frequent visitors, quick add)
-- ❌ "Call resident" button (just opens dialer)
-- ❌ Advanced analytics dashboard
-- ❌ Export gate logs to CSV
-
-### User Flows
-
-#### **Delivery Flow (Strict Control)**
-```
-1. Rider arrives at gate
-2. Guard opens ColonyOS → Gate tab → "New Entry"
-3. Select type: "Delivery"
-4. Enter flat number (type-ahead search from society_flats)
-5. Enter rider name
-6. Tap "Take Photo" (mandatory) → camera → capture → confirm
-7. Tap "Create Entry"
-8. System:
-   - Saves entry with approval_status = 'pending'
-   - Uploads photo to storage (gate-entry-photos bucket)
-   - Sends push notification to resident(s) of that flat:
-     "🚚 Delivery for Tower 1-101 — Rider Singh
-      [Approve] [Deny]"
-   - Starts 3-minute countdown (expires_at = NOW() + 3 min)
-9. Resident receives push:
-   - Option A: Tap [Approve] directly from notification (no app open)
-   - Option B: Open app → see delivery approval screen → Approve/Deny
-10. If approved:
-    - Entry status → 'approved'
-    - Guard's app shows "APPROVED" badge on entry (realtime)
-    - Guard opens gate
-11. If denied:
-    - Entry status → 'denied'
-    - Guard shows notification: "Delivery denied by resident"
-12. If no response after 3 minutes:
-    - Entry status → 'expired'
-    - Guard must request approval again or ask resident to come to gate
-```
-
-#### **Visitor Flow (Standard)**
-```
-1. Visitor arrives (cab, friend, etc.)
-2. Guard: New Entry → type "Visitor"
-3. Enter name + flat number
-4. Photo optional (skip for privacy)
-5. Create entry → status = 'auto_approved' (no approval needed)
-6. Log entry time, guard identity
-7. Visitor proceeds
-8. When visitor leaves:
-   - Guard finds entry in logs
-   - Taps "Mark Exit"
-   - exit_time recorded
-```
-
-#### **Gate Logs & Audit**
-- **Guard view:** "Today" tab shows own entries, filterable by type/status. "History" tab with date picker.
-- **Admin view:** All entries across all guards, with full search (name, flat, date range).
-- **Resident view:** Can see entries linked to their own flat only (privacy).
-
-### Database Additions
-
-**New Table: `gate_entries`**
-```sql
-CREATE TABLE gate_entries (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  society_id UUID REFERENCES societies(id) NOT NULL,
-  guard_id UUID REFERENCES residents(id) NOT NULL,
-  entry_type TEXT NOT NULL CHECK (entry_type IN ('delivery', 'visitor', 'vip')),
-  visitor_name TEXT NOT NULL,
-  flat_number TEXT NOT NULL,  -- denormalized; matches society_flats.unit format
-  rider_photo_url TEXT,        -- only for delivery; NULL for visitor
-  approval_status TEXT DEFAULT 'pending' CHECK (approval_status IN ('pending', 'approved', 'denied', 'auto_approved', 'expired')),
-  approved_by UUID REFERENCES residents(id),
-  approved_at TIMESTAMPTZ,
-  entry_time TIMESTAMPTZ DEFAULT NOW(),
-  exit_time TIMESTAMPTZ,
-  exit_marked_by UUID REFERENCES residents(id),
-  notes TEXT,
-  created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
--- Indexes for performance
-CREATE INDEX idx_gate_entries_pending ON gate_entries(society_id, created_at DESC) WHERE approval_status = 'pending';
-CREATE INDEX idx_gate_entries_guard ON gate_entries(guard_id, created_at DESC);
-CREATE INDEX idx_gate_entries_flat_society ON gate_entries(flat_number, society_id, created_at DESC);
-CREATE INDEX idx_gate_entries_society_day ON gate_entries(society_id, DATE(entry_time), created_at DESC);
-```
-
-**Storage Bucket: `gate-entry-photos`**
-- Path: `{society_id}/{entry_id}.jpg`
-- RLS: Only guard who uploaded, admin of society, and resident of that flat can view
-- **Auto-delete cron** every 7 days: remove photos older than 30 days
-- Max file size: 500KB (compressed on upload)
-
-### RLS Policies for Gate Entry
-
-```sql
--- Residents can see entries for their own flat only
-CREATE POLICY "gate_entries_society_read" ON gate_entries FOR SELECT USING (
-  society_id = (
-    SELECT society_id FROM residents
-    WHERE user_id = auth.uid()
-    AND society_id = gate_entries.society_id
-  )
-  AND (
-    -- Resident: see own flat only
-    (SELECT unit FROM residents WHERE user_id = auth.uid()) = gate_entries.flat_number
-    -- Admin: see all
-    OR (SELECT role FROM residents WHERE user_id = auth.uid() AND society_id = gate_entries.society_id) = 'admin'
-    -- Guard: see own entries + all entries for their society (for audit)
-    OR (SELECT role FROM residents WHERE user_id = auth.uid() AND society_id = gate_entries.society_id) = 'guard'
-  )
-);
-
--- Residents can approve deliveries for their own flat only
-CREATE POLICY "gate_entries_approve_own" ON gate_entries FOR UPDATE USING (
-  approval_status = 'pending'
-  AND entry_type = 'delivery'
-  AND flat_number = (
-    SELECT unit FROM residents
-    WHERE user_id = auth.uid()
-    AND society_id = gate_entries.society_id
-  )
-);
-
--- Guards can create entries for their society
-CREATE POLICY "gate_entries_guard_insert" ON gate_entries FOR INSERT WITH CHECK (
-  guard_id = (SELECT id FROM residents WHERE user_id = auth.uid() AND role = 'guard')
-  AND society_id = (SELECT society_id FROM residents WHERE user_id = auth.uid())
-);
-
--- Guards can mark exit (only if not already exited)
-CREATE POLICY "gate_entries_mark_exit" ON gate_entries FOR UPDATE USING (
-  exit_time IS NULL
-  AND guard_id = (SELECT id FROM residents WHERE user_id = auth.uid() AND role = 'guard')
-);
-```
-
-### Edge Function Routes for Gate Entry
-
-```
-POST   /api/gate/entries
-  Body: { entry_type, visitor_name, flat_number, rider_photo_url? }
-  Auth: Guard or Admin only
-  Action: Create entry, upload photo if delivery, trigger push if delivery
-  Returns: entry object
-
-PATCH  /api/gate/entries/:id/approve
-  Body: { approved: boolean }
-  Auth: Resident (own flat) or Admin
-  Action: Update approval_status, set approved_by/approved_at
-  Returns: updated entry
-
-PATCH  /api/gate/entries/:id/exit
-  Auth: Guard only
-  Action: Set exit_time = NOW(), exit_marked_by = guard.id
-  Returns: updated entry
-
-GET    /api/gate/entries
-  Query: ?type=delivery&status=pending&flat=Tower1-101&from=2025-01-01&to=2025-01-31&page=1&limit=50
-  Auth: Guard (own entries + today), Admin (all with filters)
-  Returns: { entries: [], pagination: {page, limit, total, hasMore} }
-```
-
-### Push Notifications for Gate Entry
-
-**Type:** `delivery_approval`
-
-**Payload:**
-```json
-{
-  "to": "<expo_push_token>",
-  "title": "🚚 Delivery Approval Needed",
-  "body": "Rider Singh at gate for Tower 1-101",
-  "data": {
-    "type": "delivery_approval",
-    "entryId": "uuid-here",
-    "flat": "Tower 1-101",
-    "visitorName": "Rider Singh"
-  },
-  "actionButtons": [
-    { "action": "approve", "title": "Approve", "foreground": true },
-    { "action": "deny", "title": "Deny", "foreground": true }
-  ]
-}
-```
-
-**Android:** Action buttons appear directly on notification (no app open needed).
-**iOS:** Tap notification opens app to `DeliveryApprovalScreen` with Approve/Deny buttons.
-
-### Component Details (Gate Entry)
-
-**Guard UI:**
-- `GateEntryScreen` — Main screen with:
-  - `EntryTypeSelector` (3 radio buttons: Delivery/Visitor/VIP)
-  - `FlatSearchInput` (type-ahead, shows matching flats from `society_flats`, debounced 150ms)
-  - `PhotoCapture` (only visible for delivery type, shows preview thumbnail after capture)
-  - Submit button (disabled until flat selected + name entered + photo if delivery)
-
-- `GateLogsScreen` — Tabbed: "Today" / "History"
-  - Today: query entries WHERE `DATE(entry_time) = TODAY` AND `guard_id = current`
-  - History: date range picker + search by name/flat
-  - Each entry card shows: type badge, name, flat, time, status badge (pending/approved/denied/exited)
-  - Tap entry → `GateLogDetail` with exit button (if not exited)
-
-**Resident UI:**
-- `DeliveryApprovalScreen` — Full screen shown when resident taps delivery notification:
-  - Large rider photo (if available)
-  - Visitor name, flat number (verify it's their flat)
-  - Approve (green) / Deny (red) buttons
-  - Tapping approve sends PATCH to `/api/gate/entries/:id/approve` with `approved: true`
-
-**Admin UI:**
-- Same as guard logs but sees all guards' entries + filter by guard name
-- Can view entry details (including photo) but cannot approve/deny (that's resident-only)
-
-### Guard UX Constraints (Critical)
-
-**Design requirements derived from real-world gate conditions:**
-
-1. **One-handed operation** — All interactive elements in bottom 1/3 of screen (thumb zone). Submit button fixed at bottom.
-
-2. **Flat search must be instant** — Use `FlatSearchInput` with:
-   - Debounced input (150ms)
-   - Virtualized list (react-native-virtualized-list)
-   - Preload all flats for society into memory on app start (1000 flats = ~50KB array)
-   - Search across both block and unit: "1204" matches "Tower 1-1204"
-
-3. **Camera performance** —
-   - Request camera permissions on app first launch, not per-use
-   - Camera component should be reused, not remounted each time
-   - Photo compression: 1080px width, JPEG quality 70% → ~150KB file
-   - Show flash toggle if available (low-light gates)
-
-4. **Offline mode** —
-   - Create entry offline: store in local SQLite (via WatermelonDB or just AsyncStorage queue)
-   - Show "Pending sync" indicator
-   - When connection returns, auto-upload photos and POST to Edge Function
-   - If photo upload fails after 3 retries, alert guard: "Photo failed. Continue without?" (allow skip)
-
-5. **Error states:**
-   - Photo upload fails → show retry button + "Skip photo" option
-   - Network unavailable → "Entry saved locally. Will sync when online."
-   - Flat not in society_flats → "Flat not found. Contact RWA to add." (prevent invalid entries)
-
-### Photo Retention & Privacy
-
-**Policy:**
-- Rider photos are **Personally Identifiable Information (PII)** and biometric data under Indian DPDP Act
-- Store encrypted at rest (Supabase Storage does this)
-- Auto-delete after **30 days** via cron job
-- Accessible only to: guard who captured, admin of society, resident of that flat (RLS enforces)
-- Consent during capture: "By taking photo, you consent to storage for 30 days for security purposes"
-
-**Cron job (runs daily at 2am):**
-```sql
--- Delete photos older than 30 days from storage
--- Also delete corresponding gate_entries rows OR just set rider_photo_url = NULL?
--- Better: keep entry but remove photo after 30 days (audit trail needs entry, not photo)
-```
-
-### Metrics & Monitoring
-
-**Key metrics to track in PostHog:**
-- `gate_entry_created` (by type, guard_id, time_of_day)
-- `delivery_approval_rate` (% approved vs denied)
-- `avg_approval_time` (seconds from creation to approval/denial/expiry)
-- `photo_upload_success_rate`
-- `offline_entries_count` (guard offline scenarios)
-
-**Gate-specific dashboard for admin:**
-- Today's total entries
-- Pending approvals count
-- Avg approval time (target: <60 seconds)
-- Most active gates (if multiple entry points)
-- Delivery approval rate (benchmark: 95% approve)
-
-### Testing Strategy
-
-**Must test these scenarios:**
-
-1. **Delivery approval flow end-to-end:**
-   - Guard creates delivery entry → resident receives push within 5 seconds → resident approves from notification → guard sees real-time update
-
-2. **Expiry race condition:**
-   - Create delivery, wait 2:50, resident approves at 2:59 → should succeed (grace period)
-   - Resident approves at 3:01 → should fail ("expired")
-
-3. **Offline gate entry:**
-   - Guard puts phone in airplane mode → create entry with photo → verify saved locally → restore network → verify sync successful
-
-4. **Photo scenarios:**
-   - Upload 500KB photo → verify compression to ~150KB
-   - Upload fails after retries → guard skips → entry still created without photo
-   - Resident approves entry without photo → is that allowed? **YES** (photo is guard's responsibility, not resident's approval condition)
-
-5. **Flat search edge cases:**
-   - Society with 1000 flats → search "1204" returns "Tower 1-1204" instantly (<200ms)
-   - Invalid flat "9999" → "Flat not found" message (don't allow creation)
-   - New flat just added to society_flats but not yet in local cache → should still work (query server)
-
-6. **RLS bypass attempts:**
-   - Resident A tries to approve delivery for Flat B → should get 403
-   - Guard tries to mark exit for entry created by another guard → should work (guards can mark any exit)
-   - Admin tries to create gate entry as resident → should work? **YES** (admin can do guard actions)
-
-7. **Push notification delivery:**
-   - Test on both Android & iOS physical devices
-   - Verify action buttons appear on Android (direct approve/deny)
-   - Verify deep link on iOS opens correct screen
-
----
-
-Now let's continue with the updated Database Schema section which should include the new `society_flats` and `gate_entries` tables plus all the fixes. I'll read current Database Schema to see what's there:
-</think>
-Excellent! Now let's update the Database Schema section. I need to replace the current `societies` and `residents` tables and add `society_flats` and `gate_entries`. Let me read the current database section:<tool_call>
-<function=Read>
-
-### Tables
+# ColonyOS Implementation Plan
+
+> Security and official communication for modern apartment communities.
+
+## 1. Product Thesis
+
+ColonyOS should not compete by cloning MyGate, NoBrokerHood, ADDA, or ApnaComplex feature-for-feature. That path produces a weaker copy of a mature category.
+
+ColonyOS should compete as the product for apartment communities that want:
+
+- faster guard workflows
+- cleaner resident experience
+- lighter admin operations
+- no hardware dependency
+- no ads, no marketplace clutter, no junk features in the critical path
+
+### Ideal Customer Profile
+
+- India-first
+- 80 to 300 flats
+- 1 to 2 gates
+- committee-led or lightly managed societies
+- WhatsApp-heavy today
+- unhappy with bloated society apps or not yet digitized
+
+### Core Promise
+
+If a society wants a reliable gate and official communication system that can go live in one day, ColonyOS should feel like the obvious choice.
+
+## 2. Competitive Positioning
+
+### Market Reality
+
+The category is already crowded:
+
+- MyGate wins on breadth, scale, and ecosystem depth.
+- NoBrokerHood wins on security breadth, household workflows, and operational coverage.
+- ADDA wins on official communication credibility and privacy-oriented positioning.
+- ApnaComplex wins on mature apartment operations and guard tooling depth.
+
+This means the ColonyOS wedge must be sharper than "we also do gate entry + feed".
+
+### Where ColonyOS Wins
+
+| Competitor | What they are strong at | Where ColonyOS should attack |
+|---|---|---|
+| MyGate | Large-scale ERP, many modules, distribution, monetization ecosystem | Simpler daily operations, cleaner UX, calmer resident app, faster onboarding |
+| NoBrokerHood | Security breadth, household access, many operational features | Less bloat, less clutter, stronger mobile speed, easier setup for smaller societies |
+| ADDA | Official communication credibility, privacy messaging, apartment admin maturity | Better guard speed, more focused v1, easier day-one rollout |
+| ApnaComplex | Mature community ops, guard workflows, offline expectations | Better product taste, cleaner interaction model, less enterprise heaviness |
+
+### Positioning Statement
+
+ColonyOS is the fastest way for a modern apartment community to run gate approvals and official notices without adopting a bloated ERP.
+
+### What ColonyOS Must Not Become
+
+- not a resident social network
+- not a marketplace app
+- not an ad platform
+- not an accounting ERP in v1
+- not a "do everything badly" clone
+
+## 3. Product Differentiation
+
+ColonyOS is defined by four promises.
+
+### 1. 30-Second Gate Flow
+
+A guard can create a delivery or visitor entry in under 30 seconds on a low-end Android phone, one-handed, under poor network conditions.
+
+This is the main wedge. If this flow is not materially better than incumbents, the product is not differentiated.
+
+### 2. Calm Official App
+
+Residents should see:
+
+- official notices
+- urgent alerts
+- delivery approvals
+- visitor records for their flat
+
+They should not see:
+
+- classifieds in v1
+- social clutter
+- ad inventory
+- noisy engagement bait
+
+### 3. 1-Day Society Launch
+
+An 80 to 300 flat society should be able to:
+
+1. import flats
+2. assign admins and guards
+3. invite households
+4. train guards
+5. go live
+
+all in one day.
+
+### 4. Visible Privacy Defaults
+
+Privacy should be obvious in the product:
+
+- short retention windows
+- explicit capture consent language
+- signed media access
+- audit trail for overrides
+- no unnecessary personal data
+- no ads or resale language
+
+## 4. Product Scope
+
+### v1 In Scope
+
+- phone OTP login
+- society creation and setup
+- flat import and flat structure templates
+- household/member linking
+- official notices
+- urgent alerts
+- delivery approval flow
+- visitor logging
+- gate logs
+- push notifications
+- offline guard sync
+- audit log
+- basic admin web console
+
+### v1 Out of Scope
+
+- direct messages
+- classifieds / sale posts
+- social feed features
+- resident-to-resident engagement loops
+- marketplace features
+- payments and accounting
+- advanced dashboards
+- CRM setup
+- public pricing certainty
+- VIP visitor flow
+
+## 5. Platform Strategy
+
+### Resident App
+
+- Expo React Native
+- OTP auth
+- notices, alerts, delivery approvals, own flat gate history
+
+### Guard App
+
+- same Expo codebase, role-based guard mode
+- Android-first
+- optimized for fast entry creation
+- offline-safe queue
+
+### Admin Console
+
+- slim web console
+- imports, settings, audit, flat management, guard management, gate logs
+- optimized for desktop and tablet use
+
+Admins may still use the mobile app for quick actions, but primary configuration and audit work belongs on web.
+
+## 6. UX Principles
+
+### Guard UX Is The Product
+
+Guard flows must be designed for:
+
+- one-handed usage
+- sunlight visibility
+- low-end Android phones
+- weak network
+- multilingual labels later if needed
+- large tap targets
+- zero ambiguity on approval state
+
+### Resident UX Should Feel Calm
+
+- official content only
+- low-notification-noise defaults
+- no decorative complexity in core flows
+- clear distinction between notice, alert, approval request, and history
+
+### Design System Direction
+
+Use the existing custom visual language in `design-system/`.
+
+Do not use React Native Paper as the primary UI system. It will flatten the product into generic Material UI and kill the visual differentiation already present in the repo.
+
+## 7. User Roles
+
+### Resident
+
+- join society
+- belong to one flat in that society
+- receive delivery approval requests
+- see notices and alerts
+- see gate history for their flat
+
+### Guard
+
+- create delivery entries
+- create visitor entries
+- capture delivery photos
+- mark exits
+- view own shift logs
+
+### Admin
+
+- manage society settings
+- manage flats and members
+- assign guards
+- publish notices and alerts
+- view all gate logs
+- override approval outcomes when policy allows
+- review audit logs
+
+## 8. Core User Flows
+
+### Society Launch Flow
+
+1. Admin creates society
+2. Admin selects a flat structure template or uploads CSV
+3. System creates `society_flats`
+4. Admin assigns additional admins and guards
+5. System generates invite links / QR codes
+6. Households join and attach to their flat
+7. Guard training mode walks through first entry
+8. Society goes live
+
+### Delivery Approval Flow
+
+1. Guard opens Gate
+2. Search flat
+3. Enter rider name
+4. Capture photo
+5. Submit entry
+6. Resident household members receive push
+7. First valid approval or denial wins
+8. Guard sees realtime result
+9. Entry expires if no action within configured window
+10. Every approval, denial, expiry, and override is logged
+
+### Visitor Flow
+
+1. Guard opens Gate
+2. Search flat
+3. Enter visitor name
+4. Optional photo if policy requires it later
+5. Submit entry
+6. Guard marks exit later
+7. Entry and exit appear in logs
+
+### Official Communication Flow
+
+1. Admin creates notice or alert
+2. Residents receive in-app and optional push
+3. Alerts have expiry and higher visual priority
+4. Notices remain visible until archived
+
+## 9. Information Architecture
+
+### Resident Mobile Navigation
+
+- Home
+- Gate
+- Notices
+- Profile
+
+`Home` shows urgent alerts and approval requests first. It is not an open social feed.
+
+### Guard Mobile Navigation
+
+- New Entry
+- Logs
+- Profile
+
+### Admin Web Navigation
+
+- Overview
+- Flats
+- Members
+- Guards
+- Notices
+- Gate Logs
+- Audit
+- Settings
+
+## 10. Technical Architecture
+
+### Frontend
+
+- Expo React Native for resident and guard mobile experiences
+- custom component system from `design-system/`
+- TanStack Query for server state
+- local persisted queue for guard offline actions
+
+### Admin Web
+
+- Next.js or equivalent lightweight web app
+- shares types and API contracts with mobile app
+
+### Backend
+
+- Supabase Auth for OTP login
+- Postgres as source of truth
+- Row Level Security for data isolation
+- Edge Functions for guarded write operations and signed media access
+- Realtime for approval updates and official announcements where needed
+- Storage for gate photos
+
+### Storage Rules
+
+- separate buckets for gate photos and other media
+- no direct public gate photo URLs
+- signed URL access only
+- retention-driven deletion job
+
+## 11. Data Model
+
+The current plan should stop treating flats as loose text. The canonical relation must be the flat record.
+
+### Core Tables
 
 #### `societies`
-```sql
-CREATE TABLE societies (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  name TEXT NOT NULL,
-  city TEXT NOT NULL,
-  address TEXT,
-  invite_code TEXT UNIQUE NOT NULL,  -- 6-char code e.g. "RK-7X2P"
-  flat_structure JSONB NOT NULL,     -- {format: "tower-flat", blocks: [...], units_per_block: {...}}
-  status TEXT DEFAULT 'active' CHECK (status IN ('active', 'suspended', 'archived')),
-  max_units INTEGER,                 -- total number of flats (for analytics)
-  invited_count INTEGER DEFAULT 0,   -- count of invited residents
-  created_by UUID REFERENCES auth.users(id),
-  created_at TIMESTAMPTZ DEFAULT NOW()
-);
-```
 
-#### `residents`
-```sql
-CREATE TABLE residents (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id UUID REFERENCES auth.users(id) UNIQUE NOT NULL,
-  society_id UUID REFERENCES societies(id) NOT NULL,
-  flat_number TEXT NOT NULL,  -- denormalized: "Tower 1-101", "B-204", etc.
-  display_name TEXT NOT NULL,
-  role TEXT NOT NULL DEFAULT 'resident'
-    CHECK (role IN ('resident', 'admin', 'guard')),
-  directory_visibility TEXT DEFAULT 'block'  -- more private by default
-    CHECK (directory_visibility IN ('all', 'block', 'hidden')),
-  push_token TEXT,                   -- Expo push token
-  push_token_updated_at TIMESTAMPTZ,
-  is_active BOOLEAN DEFAULT TRUE,
-  onboarding_completed BOOLEAN DEFAULT FALSE,
-  last_seen_at TIMESTAMPTZ,
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  UNIQUE(society_id, user_id)  -- one resident record per user per society
-);
+- metadata about the society
+- invite code
+- status
+- launch state
 
-CREATE INDEX idx_residents_user ON residents(user_id);
-CREATE INDEX idx_residents_society_role ON residents(society_id, role);
-CREATE INDEX idx_residents_flat ON residents(society_id, flat_number);
-```
+#### `society_flats`
+
+- canonical flat row
+- `society_id`
+- `block`
+- `unit`
+- `display_name`
+- occupancy / activation metadata
+
+`display_name` is for UI. `id` is the canonical relation.
+
+#### `society_members`
+
+- maps authenticated user to society
+- `society_id`
+- `society_flat_id`
+- `role` = resident | admin | guard
+- `member_type` = owner | tenant | family | staff
+- `display_name`
+- active state
+
+Important rules:
+
+- remove global `UNIQUE(user_id)`
+- allow the same user in multiple societies if needed
+- use `UNIQUE(society_id, user_id)` instead
+- residents link to one flat through `society_flat_id`
+- multiple members can belong to the same flat
+
+#### `push_devices`
+
+- one row per device token
+- `member_id`
+- `platform`
+- `push_token`
+- `last_seen_at`
+- active / invalid state
+
+Do not store one push token directly on the member row. Multi-device households are normal.
 
 #### `posts`
-```sql
-CREATE TABLE posts (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  society_id UUID REFERENCES societies(id) NOT NULL,
-  author_id UUID REFERENCES residents(id) NOT NULL,
-  author_flat TEXT NOT NULL,         -- denormalized flat display
-  category TEXT NOT NULL
-    CHECK (category IN ('alert', 'notice', 'service', 'help', 'sale')),
-  title TEXT NOT NULL,
-  body TEXT,
-  image_url TEXT,                    -- optional photo attachment
-  is_pinned BOOLEAN DEFAULT FALSE,
-  is_resolved BOOLEAN DEFAULT FALSE,
-  is_deleted BOOLEAN DEFAULT FALSE,
-  is_hidden BOOLEAN DEFAULT FALSE,   -- for moderation (reported posts)
-  deleted_reason TEXT,
-  is_duplicate_of UUID REFERENCES posts(id),  -- tracks duplicate alerts
-  confirmed_count INT DEFAULT 0,     -- denormalized reaction counts
-  resolved_count INT DEFAULT 0,
-  thanks_count INT DEFAULT 0,
-  comment_count INT DEFAULT 0,
-  expires_at TIMESTAMPTZ NOT NULL,   -- auto-set by trigger based on category
-  edited_at TIMESTAMPTZ,
-  edited_by UUID REFERENCES residents(id),
-  created_at TIMESTAMPTZ DEFAULT NOW()
-);
 
-CREATE INDEX idx_posts_society_feed ON posts(society_id, is_pinned DESC, created_at DESC)
-  WHERE is_deleted = FALSE AND is_hidden = FALSE;
-CREATE INDEX idx_posts_society_category ON posts(society_id, category, created_at DESC)
-  WHERE is_deleted = FALSE;
-```
+Limit categories in v1 to:
 
-#### `reactions`
-```sql
-CREATE TABLE reactions (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  post_id UUID REFERENCES posts(id) ON DELETE CASCADE NOT NULL,
-  resident_id UUID REFERENCES residents(id) NOT NULL,
-  type TEXT NOT NULL
-    CHECK (type IN ('confirmed', 'resolved', 'thanks')),
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  UNIQUE(post_id, resident_id)       -- one reaction per person per post
-);
-```
+- `alert`
+- `notice`
 
-#### `comments`
-```sql
-CREATE TABLE comments (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  post_id UUID REFERENCES posts(id) ON DELETE CASCADE NOT NULL,
-  author_id UUID REFERENCES residents(id) NOT NULL,
-  author_flat TEXT NOT NULL,
-  body TEXT NOT NULL,
-  is_deleted BOOLEAN DEFAULT FALSE,
-  created_at TIMESTAMPTZ DEFAULT NOW()
-);
-```
+Remove social categories from v1.
 
-#### `direct_messages`
-```sql
-CREATE TABLE direct_messages (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  society_id UUID REFERENCES societies(id) NOT NULL,
-  sender_id UUID REFERENCES residents(id) NOT NULL,
-  receiver_id UUID REFERENCES residents(id) NOT NULL,
-  conversation_id TEXT GENERATED ALWAYS AS (
-    CASE WHEN sender_id < receiver_id
-      THEN sender_id || ':' || receiver_id
-      ELSE receiver_id || ':' || sender_id
-    END
-  ) STORED,
-  body TEXT NOT NULL,
-  is_read BOOLEAN DEFAULT FALSE,
-  created_at TIMESTAMPTZ DEFAULT NOW()
-);
+#### `gate_entries`
 
-CREATE INDEX idx_dms_conversation ON direct_messages(conversation_id, created_at DESC);
-CREATE INDEX idx_dms_sender_receiver ON direct_messages(sender_id, receiver_id, created_at DESC);
-```
+- `society_id`
+- `society_flat_id`
+- `created_by_member_id`
+- `entry_type` = delivery | visitor
+- `visitor_name`
+- `photo_path`
+- `approval_status` = pending | approved | denied | auto_approved | expired
+- `approved_by_member_id`
+- `approved_at`
+- `expires_at`
+- `entry_time`
+- `exit_time`
+- `exit_marked_by_member_id`
+- `offline_client_id`
+- `created_at`
 
-#### `reports`
-```sql
-CREATE TABLE reports (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  post_id UUID REFERENCES posts(id),
-  message_id UUID REFERENCES direct_messages(id),
-  reporter_id UUID REFERENCES residents(id) NOT NULL,
-  reason TEXT NOT NULL,
-  status TEXT DEFAULT 'pending'
-    CHECK (status IN ('pending', 'reviewed', 'dismissed')),
-  reviewed_by UUID REFERENCES residents(id),
-  resolution_notes TEXT,  -- admin notes on decision
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  UNIQUE(reporter_id, post_id)  -- one report per person per post
-);
+Key changes:
 
-CREATE INDEX idx_reports_status ON reports(status, created_at DESC) WHERE status = 'pending';
-```
+- remove `vip` from v1
+- add `expires_at`
+- use `society_flat_id` as canonical foreign key
+- keep flat display text denormalized only for snapshots if needed
 
-### Key Database Functions & Triggers
+#### `audit_log`
 
-```sql
--- Auto-set expires_at based on category
-CREATE OR REPLACE FUNCTION set_post_expiry()
-RETURNS TRIGGER AS $$
-BEGIN
-  NEW.expires_at := CASE NEW.category
-    WHEN 'alert'   THEN NOW() + INTERVAL '6 hours'
-    WHEN 'notice'  THEN NOW() + INTERVAL '100 years'  -- never expires
-    WHEN 'service' THEN NOW() + INTERVAL '60 days'
-    WHEN 'help'    THEN NOW() + INTERVAL '7 days'
-    WHEN 'sale'    THEN NOW() + INTERVAL '21 days'
-  END;
-  RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
+- `society_id`
+- `actor_member_id`
+- `action`
+- `entity_type`
+- `entity_id`
+- `changes`
+- `context`
+- `created_at`
 
-CREATE TRIGGER trg_set_post_expiry
-  BEFORE INSERT ON posts
-  FOR EACH ROW EXECUTE FUNCTION set_post_expiry();
+Actions to log in v1:
 
--- Auto-update reaction counts on posts
-CREATE OR REPLACE FUNCTION update_reaction_counts()
-RETURNS TRIGGER AS $$
-BEGIN
-  IF TG_OP = 'INSERT' THEN
-    UPDATE posts SET
-      confirmed_count = CASE WHEN NEW.type = 'confirmed' THEN confirmed_count + 1 ELSE confirmed_count END,
-      resolved_count  = CASE WHEN NEW.type = 'resolved'  THEN resolved_count + 1  ELSE resolved_count END,
-      thanks_count    = CASE WHEN NEW.type = 'thanks'    THEN thanks_count + 1    ELSE thanks_count END
-    WHERE id = NEW.post_id;
-  ELSIF TG_OP = 'DELETE' THEN
-    UPDATE posts SET
-      confirmed_count = CASE WHEN OLD.type = 'confirmed' THEN confirmed_count - 1 ELSE confirmed_count END,
-      resolved_count  = CASE WHEN OLD.type = 'resolved'  THEN resolved_count - 1  ELSE resolved_count END,
-      thanks_count    = CASE WHEN OLD.type = 'thanks'    THEN thanks_count - 1    ELSE thanks_count END
-    WHERE id = OLD.post_id;
-  END IF;
-  RETURN COALESCE(NEW, OLD);
-END;
-$$ LANGUAGE plpgsql;
+- gate entry created
+- gate entry approved
+- gate entry denied
+- gate entry expired
+- gate exit marked
+- admin override
+- notice created
+- notice archived
+- member role changed
 
-CREATE TRIGGER trg_update_reaction_counts
-  AFTER INSERT OR DELETE ON reactions
-  FOR EACH ROW EXECUTE FUNCTION update_reaction_counts();
+## 12. Security And Privacy
 
--- Cron: soft-delete expired posts every 15 minutes
-SELECT cron.schedule('expire-posts', '*/15 * * * *', $$
-  UPDATE posts
-  SET is_deleted = TRUE, deleted_reason = 'auto-expired'
-  WHERE expires_at < NOW() AND is_deleted = FALSE;
-$$);
-```
+### Security
 
-### Row Level Security (Critical)
+- RLS is the baseline boundary
+- every Edge Function validates JWT and role
+- signed media access for gate photos
+- no cross-society reads
+- resident can only see entries tied to their own flat
+- guard can only create entries in their own society
+- admin override paths must be explicit, not implied
 
-```sql
--- All tables: residents can only access data from their own society
-ALTER TABLE posts ENABLE ROW LEVEL SECURITY;
-ALTER TABLE residents ENABLE ROW LEVEL SECURITY;
-ALTER TABLE reactions ENABLE ROW LEVEL SECURITY;
-ALTER TABLE comments ENABLE ROW LEVEL SECURITY;
-ALTER TABLE direct_messages ENABLE ROW LEVEL SECURITY;
+### Privacy
 
--- Posts: society members only, exclude soft-deleted
-CREATE POLICY "posts_society_read" ON posts FOR SELECT USING (
-  society_id = (SELECT society_id FROM residents WHERE user_id = auth.uid())
-  AND is_deleted = FALSE
-);
+- no ads
+- no data resale
+- delivery photo retention is short and documented
+- capture consent shown in guard flow
+- audit trail exists for every sensitive action
+- legal copy should be conservative until reviewed
 
--- Posts: only author can insert, with their society_id
-CREATE POLICY "posts_insert" ON posts FOR INSERT WITH CHECK (
-  author_id = (SELECT id FROM residents WHERE user_id = auth.uid())
-  AND society_id = (SELECT society_id FROM residents WHERE user_id = auth.uid())
-);
+### Compliance Direction
 
--- Posts: admin can update any post (pin/delete), author can update own (resolve)
-CREATE POLICY "posts_update" ON posts FOR UPDATE USING (
-  author_id = (SELECT id FROM residents WHERE user_id = auth.uid())
-  OR (SELECT role FROM residents WHERE user_id = auth.uid()) = 'admin'
-);
+Design for DPDP-safe behavior, but do not claim legal compliance in product copy without counsel review.
 
--- DMs: only sender or receiver can see
-CREATE POLICY "dm_access" ON direct_messages FOR SELECT USING (
-  sender_id = (SELECT id FROM residents WHERE user_id = auth.uid())
-  OR receiver_id = (SELECT id FROM residents WHERE user_id = auth.uid())
-);
+## 13. API And Write Logic
 
--- Directory: respect visibility settings
-CREATE POLICY "directory_read" ON residents FOR SELECT USING (
-  society_id = (SELECT society_id FROM residents WHERE user_id = auth.uid())
-  AND is_active = TRUE
-  AND (
-    directory_visibility = 'all'
-    OR (directory_visibility = 'block' AND block = (SELECT block FROM residents WHERE user_id = auth.uid()))
-    OR user_id = auth.uid()
-  )
-);
-```
+### Principle
 
----
+All sensitive write operations should happen through backend-controlled APIs, not raw client writes.
 
-## MVP Feature Breakdown (Build Order)
+### Required APIs
 
-### Phase 1 — Foundation (Days 1-3)
+- `POST /api/societies`
+- `POST /api/societies/:id/flats/import`
+- `POST /api/invites`
+- `POST /api/notices`
+- `POST /api/gate/entries`
+- `PATCH /api/gate/entries/:id/approve`
+- `PATCH /api/gate/entries/:id/deny`
+- `PATCH /api/gate/entries/:id/exit`
+- `POST /api/gate/entries/:id/photo-url`
+- `GET /api/gate/logs`
+- `GET /api/audit`
 
-- [ ] Expo project init with Expo Router
-- [ ] Supabase project setup (DB, Auth, RLS)
-- [ ] TypeScript types matching schema
-- [ ] Supabase client setup with auth context
-- [ ] Phone OTP login screen
-- [ ] Society code entry + QR scan screen
-- [ ] Flat number selection screen
-- [ ] Root layout with auth gate (redirect to login if not authenticated)
+### Race Safety
 
-### Phase 2 — Feed Core (Days 4-7)
+Delivery approval must be atomic.
 
-- [ ] Bottom tab navigator (Feed, Directory, Messages, Profile)
-- [ ] Feed screen — fetch posts by society, sorted by recency
-- [ ] Category filter chips (Alert, Notice, Service, Help, Sale)
-- [ ] PostCard component — category tag, flat badge, time, reaction counts
-- [ ] Alert posts pinned at top with red badge + countdown timer
-- [ ] Notice posts pinned below alerts, visually distinct (official look)
-- [ ] Post creation screen with category selector
-- [ ] Admin-only: "Notice" category visible in post creation
-- [ ] Image attachment on posts (camera + gallery picker → Supabase Storage)
+Two household members pressing approve at the same time must not produce inconsistent results.
 
-### Phase 3 — Reactions & Duplicate Detection (Days 8-10)
+Implementation requirement:
 
-- [ ] ReactionBar component (confirmed / resolved / thanks)
-- [ ] One reaction per resident per post (toggle behavior)
-- [ ] Live reaction count updates via Supabase Realtime
-- [ ] Duplicate alert detection — keyword match against active alerts
-- [ ] DuplicatePrompt bottom sheet ("upvote existing or post separately?")
-- [ ] Comments on service/help/sale posts (not alerts/notices)
-- [ ] Comment count cap: 50 per post, then lock
+- use a single transaction or RPC that updates only when `approval_status = 'pending'`
+- return the winning result deterministically
+- log the action in the same transaction where possible
 
-### Phase 4 — Push Notifications (Days 11-12)
+## 14. Performance Targets
 
-- [ ] Expo push token registration on login
-- [ ] Store push token in `residents.push_token`
-- [ ] Supabase Edge Function: on new alert INSERT → send push to all society residents
-- [ ] Supabase Edge Function: on new notice INSERT → send push to all society residents
-- [ ] Notification settings screen — per-category toggles
-- [ ] Evening digest Edge Function (8pm cron) — summary of day's non-alert posts
+These are product requirements, not nice-to-haves.
 
-### Phase 5 — Directory & DMs (Days 13-15)
+- guard creates a new delivery entry in under 30 seconds
+- flat search responds in under 200ms for 1000 flats
+- approval status update reaches guard in under 5 seconds for 95 percent of cases
+- app remains usable on low-end Android with 2GB RAM
+- offline-created entry syncs without duplication after reconnect
 
-- [ ] Directory screen — list residents by block/flat, respect visibility
-- [ ] Search by flat number or name
-- [ ] Resident profile screen with DM button
-- [ ] Message list screen — conversations sorted by last message
-- [ ] Chat thread screen — real-time via Supabase Realtime
-- [ ] Unread message badge on Messages tab
+## 15. Acceptance Criteria
 
-### Phase 6 — Admin Features (Days 16-17)
+### Product Acceptance
 
-- [ ] Long-press post in feed → admin actions (Pin / Delete with reason)
-- [ ] Profile → Manage Members screen (list residents, approve/reject pending)
-- [ ] Profile → Reported Posts screen (review reports, dismiss or act)
-- [ ] Admin can issue posting cooldown (24h, 7d) to residents
-- [ ] Society settings screen (edit name, regenerate invite code)
+- one society with 80 to 300 flats can launch in one day
+- residents can join without manual cleanup of flat names
+- admins can audit all gate actions from web
+- guard can complete the main flow without training debt
 
-### Phase 7 — Polish (Days 18-20)
+### UX Acceptance
 
-- [ ] Empty states for all screens (new society with no posts yet)
-- [ ] Pull-to-refresh on feed
-- [ ] Skeleton loading states
-- [ ] Haptic feedback on reactions
-- [ ] Auto-expire visual — countdown timer on alerts ("expires in 2h 14m")
-- [ ] Offline cache — feed loads from AsyncStorage first, then refreshes
-- [ ] App icon, splash screen
-- [ ] EAS Build config for Android APK / Play Store
+- the gate entry form uses large touch targets and minimal fields
+- delivery result state is impossible to miss
+- the resident app feels official, calm, and uncluttered
+- the design system remains custom and intentional
 
----
+### Technical Acceptance
 
-## User Review Required
+- all flat relationships use `society_flat_id`
+- no gate photo is publicly accessible
+- audit log covers all sensitive actions
+- approval race condition is handled safely
 
-> [!IMPORTANT]
-> **Design Direction:** I'll use React Native Paper (Material Design 3) for components — cards, FABs, chips, bottom navigation, dialogs. This gives a clean, polished Android-native feel. On iOS it'll look distinctive rather than "native iOS." Are you OK with Material Design, or do you prefer a custom design system?
+## 16. Test Plan
 
-> [!IMPORTANT]
-> **Supabase Project:** Do you already have a Supabase project set up, or should I create the migration files for you to run when you create one? I'll need the Supabase URL and anon key to wire up the client.
+### Critical Automated Tests
 
-> [!IMPORTANT]  
-> **Guard Role:** You mentioned "Guard" as a role. For MVP with no CCTV, guards can only view the feed. Should I include the guard role at all in v1, or strip it out entirely and add it when CCTV comes in Phase 2?
+- RLS: resident from Flat A cannot read Flat B gate entries
+- RLS: member from Society A cannot read Society B data
+- approval race: two members approve or deny at the same time
+- offline sync: duplicate client submissions do not create duplicate gate entries
+- audit log: every sensitive action creates a log row
+- retention job: expired gate photos are no longer retrievable
 
-> [!IMPORTANT]
-> **Expo Account:** Do you have an Expo account / EAS set up? This is needed for push notifications and builds. If not, I'll include setup steps.
+### Critical Manual Tests
 
----
+- guard completes delivery entry in under 30 seconds
+- low-end Android guard device remains responsive
+- flat search works with 1000 flats
+- approval notification and deep link work on physical devices
+- admin can import flats and assign guards from web
+- resident sees only their own flat history
 
-## Open Questions
+## 17. Delivery Phases
 
-> [!WARNING]
-> **Flat number structure varies wildly across Indian buildings.** Some use "A-101", some use "Tower 1, Flat 204", some use "3BHK-14". The schema uses `block` + `unit` separately. During society setup, should the admin define the exact flat numbering scheme, or should we keep it as free-text entry by the resident?
+### Phase 0 - Plan Cleanup
 
-> [!WARNING]
-> **Multiple residents per flat.** The current schema allows multiple `residents` with the same `(society_id, block, unit)` via different `user_id`. But who "owns" the flat identity? Should the first registrant be the primary, with subsequent registrants needing approval from the primary? Or is everyone equal?
+- finalize this implementation plan
+- create product copy from this positioning
+- remove old contradictory sections
 
----
+### Phase 1 - Foundation
 
-## Verification Plan
+- Supabase project setup
+- auth
+- base schema
+- `society_flats`
+- `society_members`
+- `push_devices`
+- `audit_log`
+- shared types
+- design system baseline
 
-### Automated
-- TypeScript strict mode — catches type errors at build time
-- Supabase RLS policies tested via `supabase test` with different auth contexts
-- Expo build succeeds without errors (`eas build --profile development`)
+### Phase 2 - Society Launch
 
-### Manual
-- Install dev build on physical Android device
-- Complete onboarding flow: register → OTP → society code → flat selection
-- Post an alert, see it appear in real-time on a second device
-- React to a post, see count update live
-- Test duplicate detection — post two similar alerts
-- Test admin actions — pin, delete, manage members
-- Test push notification receipt for alerts
-- Test directory visibility settings
+- admin web shell
+- flat import
+- invite links / QR
+- household linking
+- role assignment
+
+### Phase 3 - Gate Operations
+
+- guard app shell
+- flat search
+- delivery flow
+- visitor flow
+- offline queue
+- realtime approval result
+- exit marking
+
+### Phase 4 - Resident Experience
+
+- resident home
+- notices
+- alerts
+- approval requests
+- flat history
+
+### Phase 5 - Hardening
+
+- signed photo access
+- retention job
+- audit views
+- device testing
+- pilot launch prep
+
+## 18. Launch Strategy
+
+### First Beachhead
+
+Target apartment communities with:
+
+- 80 to 300 flats
+- visible WhatsApp chaos
+- no deep ERP dependency
+- committee members willing to try a cleaner product
+
+### Sales Motion
+
+- founder-led sales
+- founder-led onboarding for first societies
+- demo led by guard flow and one-day launch promise
+
+### Demo Story
+
+Lead with:
+
+1. guard creates entry fast
+2. resident approves instantly
+3. admin audits it later
+4. notices and alerts stay clean and official
+
+Do not lead with broad feature count.
+
+## 19. Market References
+
+Use these as positioning references, not as products to clone:
+
+- MyGate: https://mygate.com/
+- MyGate visitor management: https://mygate.com/visitor-management/
+- NoBrokerHood visitor system: https://www.nobrokerhood.com/solutions/visitor-registration-system
+- NoBrokerHood security platform: https://www.nobrokerhood.com/solutions/apartment-security-management-system
+- ADDA: https://contact.adda.io/
+- ADDA Essential: https://contact.adda.io/essential/
+- ApnaComplex Gatekeeper: https://www.apnacomplex.com/gatekeeper
+
+## 20. Non-Negotiables
+
+- guard UX is the wedge
+- official communication stays focused
+- flat records are canonical
+- household access is first-class
+- admin web exists in v1
+- privacy defaults are visible
+- no clone strategy
+
